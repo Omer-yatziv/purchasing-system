@@ -3,10 +3,9 @@ import pandas as pd
 from thefuzz import fuzz, process
 from io import BytesIO
 import openpyxl
-from openpyxl.utils.dataframe import dataframe_to_rows
 
 st.set_page_config(page_title="מערכת רכש חכמה", layout="wide")
-st.title("🎯 מערכת הצלבת רכש - גרסת פורמט מקורי")
+st.title("🎯 מערכת הצלבת רכש - שמירת מבנה ממוזג")
 
 @st.cache_data
 def load_erp():
@@ -24,89 +23,92 @@ erp_df = load_erp()
 if erp_df is None:
     st.error("⚠️ קובץ ה-ERP חסר ב-GitHub")
 else:
-    st.success(f"ERP נטען בהצלחה")
-    purchase_file = st.file_uploader("העלה בקשת רכש (המקורית)", type=['xlsx', 'xlsm'])
+    purchase_file = st.file_uploader("העלה בקשת רכש מקורית", type=['xlsx', 'xlsm'])
     
     if purchase_file:
-        skip_rows = st.number_input("באיזו שורה מתחילה הטבלה (כותרות)?", value=10) - 1
+        # הגדרות משתמש
+        start_row = st.number_input("באיזו שורה מתחילה הטבלה (כותרות)?", value=10)
         
-        # טעינת הקובץ המקורי עם openpyxl כדי לשמור על עיצוב
-        wb = openpyxl.load_workbook(purchase_file)
-        ws = wb.active # הלשונית הראשונה
-        
-        # קריאת הנתונים לעיבוד (מתוך ה-Worksheet)
-        data = ws.values
-        cols = next(data)[0:] # קריאת הכותרות
-        df_full = pd.DataFrame(data, columns=cols)
-        # סינכרון עם שורת הכותרת האמיתית
-        df_for_logic = pd.read_excel(purchase_file, header=skip_rows)
-        df_for_logic.columns = df_for_logic.columns.astype(str).str.strip()
+        # טעינת הקובץ בצורה שתשמור על הכל
+        wb = openpyxl.load_workbook(purchase_file, keep_vba=True)
+        ws = wb.active
 
-        st.info("בדיקת עמודות מקור: B-מס\"ד, C-קבוצה, D-ח\"ג")
-        
-        if st.button("הפעל עיבוד ושמור פורמט"):
-            results_for_analysis = []
+        if st.button("הפעל עיבוד חכם"):
             erp_choices = erp_df['תיאור פריט'].astype(str).tolist()
+            results_analysis = []
             
-            # הכנת עמודות חדשות בגיליון המקורי (הזזת הכל ימינה כדי לפנות מקום ל-3 עמודות ERP)
-            ws.insert_cols(1, amount=3)
-            ws.cell(row=skip_rows+1, column=1).value = "קוד פריט סאפ"
-            ws.cell(row=skip_rows+1, column=2).value = "תיאור סאפ"
-            ws.cell(row=skip_rows+1, column=3).value = "% התאמה"
+            # אנחנו לא מזיזים עמודות (insert_cols) כדי לא להרוס מיזוגים.
+            # במקום זה, נניח שעמודות A ו-B ו-C הן המקום לנתוני ה-ERP.
+            # אם הן תפוסות, נכתוב בעמודות פנויות בסוף או שנגדיר מראש.
+            
+            st.info("מעבד נתונים...")
+            
+            # לוגיקה למציאת העמודות לפי כותרות בשורה שצוינה
+            header_map = {}
+            for col in range(1, ws.max_column + 1):
+                val = ws.cell(row=start_row, column=col).value
+                if val:
+                    header_map[str(val).strip()] = col
 
-            # עיבוד שורה שורה (החל משורה שאחרי הכותרת)
-            current_row_excel = skip_rows + 2
-            
-            for idx, row in df_for_logic.iterrows():
-                # בניית שאילתה (מבטיח שימוש בעמודות שציינת)
-                q_group = str(row.get('קבוצה', ''))
-                q_mat = str(row.get('ח"ג', ''))
-                q_desc = str(row.get('תאור/מידה', ''))
-                
-                if q_desc == "nan" or q_desc == "": 
-                    current_row_excel += 1
-                    continue
-                
-                query = f"{q_group} {q_mat} {q_desc}".replace("nan", "").strip()
-                
-                # מציאת 4 התאמות הכי טובות (הראשונה היא הנבחרת, היתר הצעות חלופיות)
-                matches = process.extract(query, erp_choices, scorer=fuzz.token_set_ratio, limit=4)
-                
-                if matches and matches[0][1] > 40:
-                    best_match_text, score = matches[0][0], matches[0][1]
-                    erp_row = erp_df[erp_df['תיאור פריט'] == best_match_text].iloc[0]
+            # וידוא עמודות נדרשות
+            needed = ['קבוצה', 'ח"ג', 'תאור/מידה']
+            found_all = all(n in header_map for n in needed)
+
+            if not found_all:
+                st.error(f"לא נמצאו כל העמודות הנדרשות. נמצאו: {list(header_map.keys())}")
+            else:
+                # כתיבת כותרות לעמודות ה-ERP (נבחר ב-A, B, C אם הן פנויות או פשוט נכתוב בהן)
+                # אם אתה רוצה עמודות ספציפיות, נשנה את ה-1,2,3 למספרים אחרים
+                ws.cell(row=start_row, column=1).value = "קוד פריט סאפ"
+                ws.cell(row=start_row, column=2).value = "תיאור סאפ"
+                ws.cell(row=start_row+1, column=1).value = "" # ניקוי שורת משנה אם יש
+
+                for r in range(start_row + 1, ws.max_row + 1):
+                    # שליפת הנתונים לפי המיקום שנמצא ב-header_map
+                    q_group = str(ws.cell(row=r, column=header_map['קבוצה']).value or "")
+                    q_mat = str(ws.cell(row=r, column=header_map['ח"ג']).value or "")
+                    q_desc = str(ws.cell(row=r, column=header_map['תאור/מידה']).value or "")
                     
-                    # כתיבה לגיליון האקסל המקורי בעמודות החדשות A, B, C
-                    ws.cell(row=current_row_excel, column=1).value = erp_row['קוד פריט']
-                    ws.cell(row=current_row_excel, column=2).value = erp_row['תיאור פריט']
-                    ws.cell(row=current_row_excel, column=3).value = f"{score}%"
+                    if q_desc == "" or q_desc == "None": continue
                     
-                    # הכנת נתונים ללשונית הניתוח
-                    alternatives = ", ".join([f"{m[0]} ({m[1]}%)" for m in matches[1:]])
-                else:
-                    ws.cell(row=current_row_excel, column=1).value = "לא נמצא"
-                    ws.cell(row=current_row_excel, column=3).value = "0%"
-                    alternatives = "אין הצעות קרובות"
+                    query = f"{q_group} {q_mat} {q_desc}".strip()
+                    
+                    # הצלבה
+                    match = process.extractOne(query, erp_choices, scorer=fuzz.token_set_ratio)
+                    
+                    if match and match[1] > 45:
+                        best_text, score = match[0], match[1]
+                        erp_row = erp_df[erp_df['תיאור פריט'] == best_text].iloc[0]
+                        
+                        # כתיבה ישירה לתאים A ו-B בשורה הנוכחית
+                        ws.cell(row=r, column=1).value = erp_row['קוד פריט']
+                        ws.cell(row=r, column=2).value = erp_row['תיאור פריט']
+                        
+                        # הצעות חלופיות ללשונית השנייה
+                        all_matches = process.extract(query, erp_choices, limit=3)
+                        alt_text = ", ".join([f"{m[0]} ({m[1]}%)" for m in all_matches[1:]])
+                    else:
+                        ws.cell(row=r, column=1).value = "לא נמצא"
+                        score = 0
+                        alt_text = ""
 
-                results_for_analysis.append({
-                    'שורה באקסל': current_row_excel,
-                    'תיאור מבוקש': query,
-                    'נבחר ב-ERP': ws.cell(row=current_row_excel, column=2).value,
-                    'ציון': score if matches else 0,
-                    'הצעות חלופיות (3 הכי קרובות)': alternatives
-                })
-                current_row_excel += 1
+                    results_analysis.append({
+                        'שורה': r,
+                        'תיאור מקורי': query,
+                        'זיהוי': ws.cell(row=r, column=2).value,
+                        'ציון': score,
+                        'חלופות': alt_text
+                    })
 
-            # יצירת לשונית ניתוח חדשה בקובץ
-            if "ניתוח נתונים" in wb.sheetnames: del wb["ניתוח נתונים"]
-            ws_analysis = wb.create_sheet("ניתוח נתונים")
-            analysis_df = pd.DataFrame(results_for_analysis)
-            for r in dataframe_to_rows(analysis_df, index=False, header=True):
-                ws_analysis.append(r)
+                # לשונית ניתוח נתונים
+                if "ניתוח נתונים" in wb.sheetnames: del wb["ניתוח נתונים"]
+                ws_an = wb.create_sheet("ניתוח נתונים")
+                an_df = pd.DataFrame(results_analysis)
+                from openpyxl.utils.dataframe import dataframe_to_rows
+                for row_data in dataframe_to_rows(an_df, index=False, header=True):
+                    ws_an.append(row_data)
 
-            # שמירה
-            output = BytesIO()
-            wb.save(output)
-            
-            st.success("העיבוד הושלם! הפורמט המקורי נשמר והתווספו הצעות חלופיות.")
-            st.download_button("📥 הורד קובץ סופי מעובד", output.getvalue(), "Purchase_Order_Updated.xlsx")
+                output = BytesIO()
+                wb.save(output)
+                st.success("הסתיים בהצלחה!")
+                st.download_button("📥 הורד קובץ מעובד", output.getvalue(), "Final_Order.xlsx")

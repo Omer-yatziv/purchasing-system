@@ -4,134 +4,97 @@ import re
 from thefuzz import fuzz
 from io import BytesIO
 
-# הגדרות עיצוב
 st.set_page_config(page_title="מערכת רכש חכמה", layout="wide")
-st.title("🎯 מערכת התאמת רכש לסאפ - גרסה 2.0")
+st.title("🎯 מערכת התאמת רכש לסאפ - גרסה 2.1")
 
-# פונקציית עזר לניקוי וזיהוי מידות
-def clean_text(text):
-    if pd.isna(text): return ""
-    text = str(text).lower()
-    # הפיכת לוכסן או איקס למקף אחיד לצורך השוואה
-    text = text.replace('/', '-').replace('x', '-').replace('*', '-')
-    return text
-
-def check_material_conflict(req, erp):
-    # רשימת חומרים שאסור לבלבל ביניהם
-    conflicts = [
-        ("מגולוון", "שחור"),
-        ("נירוסטה", "אלומיניום"),
-        ("נירוסטה", "ברזל"),
-        ("פח", "אום")
-    ]
-    for m1, m2 in conflicts:
-        if (m1 in req and m2 in erp) or (m2 in req and m1 in erp):
-            return True
-    return False
-
-# --- טעינת בסיס נתונים קבוע ---
 @st.cache_data
 def load_erp():
     try:
-        # המערכת מחפשת את הקובץ שהעלית ל-GitHub
-        df = pd.read_excel("erp_master.xlsx")
+        # טעינת ה-CSV שהעלית (לפי המידע שיש לי הוא בפורמט CSV כרגע)
+        df = pd.read_csv("erp_master.csv") 
         return df
     except:
-        return None
+        try:
+            df = pd.read_excel("erp_master.xlsx")
+            return df
+        except:
+            return None
 
 erp_df = load_erp()
 
 if erp_df is None:
-    st.error("⚠️ קובץ erp_master.xlsx לא נמצא ב-GitHub. אנא העלה אותו.")
+    st.error("⚠️ קובץ ה-ERP לא נמצא. וודא שהעלית erp_master.xlsx או erp_master.csv")
 else:
-    st.success(f"בסיס הנתונים ERP נטען (נמצאו {len(erp_df)} פריטים)")
+    # ניקוי שמות עמודות ב-ERP (הסרת רווחים מיותרים)
+    erp_df.columns = erp_df.columns.str.strip()
+    st.success(f"בסיס הנתונים ERP נטען בהצלחה")
 
-    # --- העלאת בקשת רכש ---
-    purchase_file = st.file_uploader("העלה קובץ בקשת רכש (XLSX/XLSM)", type=['xlsx', 'xlsm'])
+    purchase_file = st.file_uploader("העלה קובץ בקשת רכש", type=['xlsx', 'xlsm'])
 
     if purchase_file:
-        # קריאת הקובץ - מתחילים משורה 10 (index 9) כברירת מחדל
-        start_row = st.number_input("שורה בה מתחילה הטבלה (10 כברירת מחדל)", value=10) - 1
-        purchase_df_full = pd.read_excel(purchase_file, header=None)
+        start_row = st.number_input("השורה בה מתחילים הנתונים (למשל 10)", value=10) - 1
         
-        # הפרדה בין הכותרת לנתונים
-        header_row = purchase_df_full.iloc[start_row]
-        data_df = purchase_df_full.iloc[start_row+1:].copy()
-        data_df.columns = header_row
+        # קריאת כל הקובץ
+        df_all = pd.read_excel(purchase_file, header=None)
+        
+        # הגדרת הכותרות לפי השורה שבחרת
+        header = df_all.iloc[start_row].fillna("Unnamed")
+        data = df_all.iloc[start_row+1:].copy()
+        data.columns = header
+        data.columns = data.columns.str.strip() # ניקוי רווחים מהכותרות
 
-        if st.button("בצע התאמה חכמה"):
-            results_list = []
-            analysis_list = []
+        if st.button("הפעל חיפוש חכם"):
+            results = []
             
-            progress = st.progress(0)
-            rows_to_process = data_df.dropna(subset=[data_df.columns[2]]) # מסנן שורות ריקות
+            # זיהוי עמודות הרכש (לפי מה שכתבת לי)
+            # אם השמות שונים אצלך באקסל, שנה אותם כאן בין הגרשיים
+            col_group = 'קבוצה'
+            col_material = 'ח"ג'
+            col_desc = 'תאור/מידה'
 
-            for idx, row in rows_to_process.iterrows():
-                # בניית תיאור מלא מ-3 עמודות: קבוצה, ח"ג, תיאור/מידה
-                # הנחה: עמודות אלו הן בסדר מסוים (למשל עמודות 0, 1, 2)
-                group_req = str(row.get('קבוצה', ''))
-                material_req = str(row.get('ח"ג', ''))
-                desc_req = str(row.get('תאור/מידה', ''))
+            for idx, row in data.iterrows():
+                # בניית השאילתה מהעמודות
+                q_group = str(row.get(col_group, ""))
+                q_mat = str(row.get(col_material, ""))
+                q_desc = str(row.get(col_desc, ""))
                 
-                full_query = f"{group_req} {material_req} {desc_req}".strip()
-                clean_query = clean_text(full_query)
+                # אם השורה ריקה לגמרי, דלג
+                if q_desc == "nan" or q_desc == "": continue
+                
+                full_query = f"{q_group} {q_mat} {q_desc}".replace("nan", "").strip()
+                
+                # חיפוש ב-ERP - אנחנו משווים לעמודה "תיאור פריט"
+                # משתמשים ב-process.extractOne לדיוק מירבי
+                from thefuzz import process
+                
+                # סינון ה-ERP רק לשורות שיש בהן תיאור
+                choices = erp_df['תיאור פריט'].dropna().astype(str).tolist()
+                best_match_tuple = process.extractOne(full_query, choices, scorer=fuzz.token_set_ratio)
+                
+                if best_match_tuple:
+                    matched_text, score = best_match_tuple[0], best_match_tuple[1]
+                    # מציאת השורה המלאה ב-ERP כדי לשלוף את הקוד
+                    erp_row = erp_df[erp_df['תיאור פריט'] == matched_text].iloc[0]
+                    
+                    res_code = erp_row['קוד פריט']
+                    res_desc = erp_row['תיאור פריט']
+                else:
+                    res_code, res_desc, score = "לא נמצא", "", 0
 
-                # חיפוש ב-ERP
-                best_score = 0
-                best_match = None
-                
-                for _, erp_row in erp_df.iterrows():
-                    erp_desc = str(erp_row['תיאור פריט'])
-                    clean_erp = clean_text(erp_desc)
-                    
-                    # בדיקת סתירה בחומרים
-                    if check_material_conflict(clean_query, clean_erp):
-                        continue
-                        
-                    # חישוב דמיון
-                    score = fuzz.token_set_ratio(clean_query, clean_erp)
-                    
-                    # בונוס על מידות מדויקות (למשל 6 מ"מ)
-                    numbers_req = re.findall(r'\d+', clean_query)
-                    for num in numbers_req:
-                        if num in clean_erp:
-                            score += 5
-                    
-                    if score > best_score:
-                        best_score = min(score, 100)
-                        best_match = erp_row
-
-                # הכנת שורה לתוצאה
-                match_code = best_match['קוד פריט'] if best_match is not None and best_score > 50 else "לא נמצא"
-                match_desc = best_match['תיאור פריט'] if best_match is not None and best_score > 50 else ""
-                
-                # הוספת העמודות החדשות להתחלה
-                new_row_data = {
-                    'קוד פריט': match_code,
-                    'תיאור סאפ': match_desc,
-                    '% התאמה': f"{best_score}%"
+                # הוספת התוצאה
+                new_row = {
+                    'קוד פריט סאפ': res_code,
+                    'תיאור סאפ': res_desc,
+                    '% התאמה': f"{score}%"
                 }
-                # איחוד עם השורה המקורית
-                full_new_row = {**new_row_data, **row.to_dict()}
-                results_list.append(full_new_row)
-                
-                # לוג ניתוח
-                analysis_list.append({
-                    'שורה': idx + 1,
-                    'תיאור בבקשה': full_query,
-                    'התאמה שנבחרה': match_desc,
-                    'ציון': best_score,
-                    'סטטוס': "✅" if best_score > 85 else "⚠️" if best_score > 55 else "❌"
-                })
-                
-            # יצירת קבצים
-            final_df = pd.DataFrame(results_list)
-            analysis_df = pd.DataFrame(analysis_list)
+                new_row.update(row.to_dict())
+                results.append(new_row)
 
+            # יצירת קובץ להורדה
+            final_df = pd.DataFrame(results)
             output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                final_df.to_excel(writer, sheet_name='בקשת רכש מעודכנת', index=False)
-                analysis_df.to_excel(writer, sheet_name='ניתוח נתונים', index=False)
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                final_df.to_excel(writer, index=False, sheet_name="בקשת רכש מעודכנת")
             
-            st.success("העיבוד הושלם!")
-            st.download_button("📥 הורד אקסל מוכן", output.getvalue(), "Purchase_Order_Final.xlsx")
+            st.success("הסתיים! הורד את הקובץ:")
+            st.download_button("הורד אקסל", output.getvalue(), "result.xlsx")

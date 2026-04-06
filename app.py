@@ -2,17 +2,19 @@ import streamlit as st
 import pandas as pd
 from thefuzz import fuzz, process
 from io import BytesIO
-import openpyxl
 
 st.set_page_config(page_title="מערכת רכש חכמה", layout="wide")
-st.title("🎯 מערכת הצלבת רכש - גרסה יציבה")
+st.title("🎯 מערכת הצלבת רכש - גרסת טבלה נקייה")
 
 @st.cache_data
 def load_erp():
     for ext in ['xlsx', 'csv']:
         try:
             name = f"erp_master.{ext}"
-            df = pd.read_excel(name) if ext == 'xlsx' else pd.read_csv(name)
+            if ext == 'xlsx':
+                df = pd.read_excel(name)
+            else:
+                df = pd.read_csv(name)
             df.columns = df.columns.str.strip()
             return df
         except: continue
@@ -21,71 +23,80 @@ def load_erp():
 erp_df = load_erp()
 
 if erp_df is None:
-    st.error("⚠️ קובץ ה-ERP חסר ב-GitHub")
+    st.error("⚠️ קובץ ה-ERP (erp_master) חסר ב-GitHub")
 else:
+    st.success(f"בסיס נתונים ERP נטען בהצלחה")
+    
     purchase_file = st.file_uploader("העלה בקשת רכש", type=['xlsx', 'xlsm'])
     
     if purchase_file:
-        start_row = st.number_input("שורת כותרות (קבוצה, ח\"ג...)", value=10)
+        # המשתמש מגדיר מאיזו שורה מתחילה הטבלה באמת
+        start_row = st.number_input("באיזו שורה מתחילה הטבלה (כותרות)?", value=10) - 1
         
-        # טעינה בפורמט בטוח
-        wb = openpyxl.load_workbook(purchase_file, data_only=False, keep_vba=True)
-        ws = wb.active
+        # טעינת הנתונים בלבד (מתעלם מכל מה שלמעלה)
+        raw_df = pd.read_excel(purchase_file, header=start_row)
+        raw_df.columns = raw_df.columns.astype(str).str.strip()
+        
+        st.write("תצוגה מקדימה של הנתונים שזוהו:")
+        st.dataframe(raw_df.head(3))
 
-        if st.button("בצע הצלבה חכמה"):
+        # בחירת עמודות לחיפוש (מוודא שמות)
+        col_options = list(raw_df.columns)
+        c_group = st.selectbox("בחר עמודת 'קבוצה'", col_options, index=col_options.index('קבוצה') if 'קבוצה' in col_options else 0)
+        c_mat = st.selectbox("בחר עמודת 'ח\"ג'", col_options, index=col_options.index('ח"ג') if 'ח"ג' in col_options else 0)
+        c_desc = st.selectbox("בחר עמודת 'תאור/מידה'", col_options, index=col_options.index('תאור/מידה') if 'תאור/מידה' in col_options else 0)
+
+        if st.button("בצע הצלבה והפק קובץ חדש"):
             erp_choices = erp_df['תיאור פריט'].astype(str).tolist()
-            results_analysis = []
+            final_results = []
+            analysis_data = []
+
+            for idx, row in raw_df.iterrows():
+                # בניית שאילתה
+                q_group = str(row.get(c_group, "")).replace("nan", "")
+                q_mat = str(row.get(c_mat, "")).replace("nan", "")
+                q_desc = str(row.get(c_desc, "")).replace("nan", "")
+                
+                if not q_desc.strip(): continue
+                
+                query = f"{q_group} {q_mat} {q_desc}".strip()
+                
+                # חיפוש חכם
+                match = process.extractOne(query, erp_choices, scorer=fuzz.token_set_ratio)
+                
+                if match and match[1] > 40:
+                    res_text, score = match[0], match[1]
+                    erp_row = erp_df[erp_df['תיאור פריט'] == res_text].iloc[0]
+                    res_code = erp_row['קוד פריט']
+                    
+                    # הצעות נוספות
+                    others = process.extract(query, erp_choices, limit=3)
+                    alt_text = ", ".join([f"{m[0]} ({m[1]}%)" for m in others[1:]])
+                else:
+                    res_code, res_text, score, alt_text = "לא נמצא", "", 0, ""
+
+                # בניית שורה חדשה לאקסל: קוד ודירוג בהתחלה, ואז שאר נתוני המקור
+                new_row = {
+                    'קוד פריט ERP': res_code,
+                    'תיאור ERP': res_text,
+                    '% התאמה': f"{score}%"
+                }
+                new_row.update(row.to_dict())
+                final_results.append(new_row)
+                
+                analysis_data.append({
+                    'שורה': idx + start_row + 2,
+                    'טקסט מקורי': query,
+                    'זיהוי נבחר': res_text,
+                    'ציון': score,
+                    'חלופות': alt_text
+                })
+
+            # יצירת קובץ הפלט
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                pd.DataFrame(final_results).to_excel(writer, sheet_name='בקשת רכש מעודכנת', index=False)
+                pd.DataFrame(analysis_data).to_excel(writer, sheet_name='ניתוח נתונים', index=False)
             
-            # מיפוי עמודות המקור
-            header_map = {}
-            for col in range(1, ws.max_column + 1):
-                val = ws.cell(row=start_row, column=col).value
-                if val:
-                    header_map[str(val).strip()] = col
-
-            needed = ['קבוצה', 'ח"ג', 'תאור/מידה']
-            if not all(n in header_map for n in needed):
-                st.error(f"חסרות עמודות בשורה {start_row}. וודא שכתוב שם: {needed}")
-            else:
-                # כתיבת כותרות בעמודות A ו-B (החל משורת הכותרת בלבד)
-                ws.cell(row=start_row, column=1).value = "קוד פריט סאפ"
-                ws.cell(row=start_row, column=2).value = "תיאור סאפ"
-
-                # מעבר על הנתונים
-                for r in range(start_row + 1, ws.max_row + 1):
-                    q_group = str(ws.cell(row=r, column=header_map['קבוצה']).value or "")
-                    q_mat = str(ws.cell(row=r, column=header_map['ח"ג']).value or "")
-                    q_desc = str(ws.cell(row=r, column=header_map['תאור/מידה']).value or "")
-                    
-                    if q_desc.strip() in ["", "None", "nan"]: continue
-                    
-                    query = f"{q_group} {q_mat} {q_desc}".strip()
-                    match = process.extractOne(query, erp_choices, scorer=fuzz.token_set_ratio)
-                    
-                    if match and match[1] > 45:
-                        best_text, score = match[0], match[1]
-                        erp_row = erp_df[erp_df['תיאור פריט'] == best_text].iloc[0]
-                        
-                        # הזרקת הנתונים לעמודה A ו-B בשורה הנוכחית בלבד
-                        ws.cell(row=r, column=1).value = erp_row['קוד פריט']
-                        ws.cell(row=r, column=2).value = erp_row['תיאור פריט']
-                        alt = process.extract(query, erp_choices, limit=3)
-                        alt_text = ", ".join([f"{m[0]} ({m[1]}%)" for m in alt[1:]])
-                    else:
-                        ws.cell(row=r, column=1).value = "לא נמצא"
-                        score, alt_text = 0, ""
-
-                    results_analysis.append({'שורה': r, 'שאילתה': query, 'זיהוי': best_text if score > 0 else "---", 'ציון': score, 'חלופות': alt_text})
-
-                # יצירת לשונית ניתוח נקייה
-                if "ניתוח נתונים" in wb.sheetnames: del wb["ניתוח נתונים"]
-                ws_an = wb.create_sheet("ניתוח נתונים")
-                headers_an = ['שורה', 'שאילתה', 'זיהוי', 'ציון', 'חלופות']
-                ws_an.append(headers_an)
-                for item in results_analysis:
-                    ws_an.append([item[h] for h in headers_an])
-
-                output = BytesIO()
-                wb.save(output)
-                st.success("העיבוד הסתיים!")
-                st.download_button("📥 הורד קובץ מתוקן", output.getvalue(), "Purchase_Order_Fixed.xlsx")
+            st.success(f"הסתיים! עובדו {len(final_results)} שורות.")
+            st.download_button("📥 הורד קובץ אקסל נקי", output.getvalue(), "Purchasing_Match_Results.xlsx")
